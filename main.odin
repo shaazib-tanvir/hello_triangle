@@ -12,6 +12,7 @@ import "core:math/bits"
 import "core:container/priority_queue"
 import "vendor:glfw"
 import vk "vendor:vulkan"
+import "graphics"
 
 g_context: runtime.Context
 
@@ -494,201 +495,6 @@ destroy_image_views :: proc(device: vk.Device, views: []vk.ImageView) {
 	delete(views)
 }
 
-create_shader_module :: proc(device: vk.Device, code: []u32) -> (module: vk.ShaderModule, result: vk.Result) {
-	shader_module_create_info := vk.ShaderModuleCreateInfo{
-		sType = .SHADER_MODULE_CREATE_INFO,
-		codeSize = size_of(u32) * len(code),
-		pCode = raw_data(code)
-	}
-
-	vk.CreateShaderModule(device, &shader_module_create_info, nil, &module) or_return
-	return module, .SUCCESS
-}
-
-get_shader_stage_create_info :: proc(device: vk.Device, module: vk.ShaderModule, stage: vk.ShaderStageFlag) -> vk.PipelineShaderStageCreateInfo {
-	shader_stage_create_info := vk.PipelineShaderStageCreateInfo{
-		sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-		stage = {stage},
-		module = module,
-		pName = "main"
-	}
-
-	return shader_stage_create_info
-}
-
-create_render_pass :: proc(device: vk.Device) -> (render_pass: vk.RenderPass, result: vk.Result) {
-	attachment := vk.AttachmentDescription{
-		format = .B8G8R8A8_SRGB,
-		samples = {._1},
-		loadOp = .CLEAR,
-		storeOp = .STORE,
-		stencilLoadOp = .DONT_CARE,
-		stencilStoreOp = .DONT_CARE,
-		initialLayout = .UNDEFINED,
-		finalLayout = .PRESENT_SRC_KHR,
-	}
-
-	attachment_ref := vk.AttachmentReference{
-		attachment = 0,
-		layout = .COLOR_ATTACHMENT_OPTIMAL
-	}
-
-	subpass := vk.SubpassDescription{
-		pipelineBindPoint = .GRAPHICS,
-		colorAttachmentCount = 1,
-		pColorAttachments = &attachment_ref,
-	}
-
-	subpass_dependency := vk.SubpassDependency{
-		srcSubpass = vk.SUBPASS_EXTERNAL,
-		dstSubpass = 0,
-		srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-		srcAccessMask = {},
-		dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-		dstAccessMask = {.COLOR_ATTACHMENT_WRITE}
-	}
-
-	render_pass_create_info := vk.RenderPassCreateInfo{
-		sType = .RENDER_PASS_CREATE_INFO,
-		attachmentCount = 1,
-		pAttachments = &attachment,
-		subpassCount = 1,
-		pSubpasses = &subpass,
-		dependencyCount = 1,
-		pDependencies = &subpass_dependency
-	}
-
-	vk.CreateRenderPass(device, &render_pass_create_info, nil, &render_pass) or_return
-	return render_pass, .SUCCESS
-}
-
-create_pipeline_layout :: proc(device: vk.Device) -> (layout: vk.PipelineLayout, result: vk.Result) {
-	layout_create_info := vk.PipelineLayoutCreateInfo{
-		sType = .PIPELINE_LAYOUT_CREATE_INFO,
-	}
-
-	vk.CreatePipelineLayout(device, &layout_create_info, nil, &layout) or_return
-	return layout, .SUCCESS
-}
-
-Vertex :: struct {
-	position: linalg.Vector3f32,
-	color: linalg.Vector3f32
-}
-
-get_vertex_attribute_descriptions :: proc(vertices: []Vertex) -> []vk.VertexInputAttributeDescription {
-	attributes := make([]vk.VertexInputAttributeDescription, reflect.struct_field_count(Vertex))
-	assert(reflect.struct_field_count(Vertex) != 0)
-	for i in 0..<reflect.struct_field_count(Vertex) {
-		attributes[i] = vk.VertexInputAttributeDescription{
-			location = u32(i),
-			binding = 0,
-			format = .R32G32B32_SFLOAT,
-			offset = u32(reflect.struct_field_at(Vertex, i).offset),
-		}
-	}
-
-	return attributes
-}
-
-create_pipeline :: proc(device: vk.Device, fragment_module: vk.ShaderModule, vertex_module: vk.ShaderModule, render_pass: vk.RenderPass, layout: vk.PipelineLayout, vertices: []Vertex) -> (pipeline: vk.Pipeline, result: vk.Result) {
-	defer vk.DestroyShaderModule(device, vertex_module, nil)
-	defer vk.DestroyShaderModule(device, fragment_module, nil)
-
-	fragment_info := get_shader_stage_create_info(device, fragment_module, .FRAGMENT)
-	vertex_info := get_shader_stage_create_info(device, vertex_module, .VERTEX)
-	stages := []vk.PipelineShaderStageCreateInfo{vertex_info, fragment_info}
-
-	vertex_binding_description := vk.VertexInputBindingDescription{
-		binding = 0,
-		stride = size_of(Vertex),
-		inputRate = .VERTEX
-	}
-
-	attribute_descriptions := get_vertex_attribute_descriptions(vertices[:])
-	defer delete(attribute_descriptions)
-
-	vertex_input_state_create_info := vk.PipelineVertexInputStateCreateInfo{
-		sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-		vertexBindingDescriptionCount = 1,
-		pVertexBindingDescriptions = &vertex_binding_description,
-		vertexAttributeDescriptionCount = u32(len(attribute_descriptions)),
-		pVertexAttributeDescriptions = raw_data(attribute_descriptions)
-	}
-
-	pipeline_input_assembly_state_create_info := vk.PipelineInputAssemblyStateCreateInfo{
-		sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-		topology = .TRIANGLE_LIST
-	}
-
-	dynamic_states := []vk.DynamicState{.VIEWPORT, .SCISSOR}
-	dynamic_state_create_info := vk.PipelineDynamicStateCreateInfo{
-		sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-		dynamicStateCount = u32(len(dynamic_states)),
-		pDynamicStates = raw_data(dynamic_states)
-	}
-
-	viewport_state_create_info := vk.PipelineViewportStateCreateInfo{
-		sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-		viewportCount = 1,
-		scissorCount = 1,
-	}
-
-	rasterizer_create_info := vk.PipelineRasterizationStateCreateInfo{
-		sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-		depthClampEnable = b32(false),
-		polygonMode = .FILL,
-		cullMode = {.BACK},
-		frontFace = .COUNTER_CLOCKWISE,
-		depthBiasEnable = b32(false),
-		lineWidth = 1.
-	}
-
-	multisample_create_info := vk.PipelineMultisampleStateCreateInfo{
-		sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-		rasterizationSamples = {._1},
-		sampleShadingEnable = b32(false),
-		minSampleShading = 1.,
-		pSampleMask = nil,
-		alphaToCoverageEnable = b32(false),
-		alphaToOneEnable = b32(false),
-	}
-
-	colorblend_attachment_state := vk.PipelineColorBlendAttachmentState{
-		blendEnable = b32(false),
-		colorWriteMask = {.R, .G, .B, .A}
-	}
-
-	colorblend_create_info := vk.PipelineColorBlendStateCreateInfo{
-		sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-		logicOpEnable = b32(false),
-		logicOp = .COPY,
-		attachmentCount = 1,
-		pAttachments = &colorblend_attachment_state
-	}
-
-	graphics_pipeline_create_info := vk.GraphicsPipelineCreateInfo{
-		sType = .GRAPHICS_PIPELINE_CREATE_INFO,
-		stageCount = u32(len(stages)),
-		pStages = raw_data(stages),
-		pVertexInputState = &vertex_input_state_create_info,
-		pInputAssemblyState = &pipeline_input_assembly_state_create_info,
-		pRasterizationState = &rasterizer_create_info,
-		pDynamicState = &dynamic_state_create_info,
-		pMultisampleState = &multisample_create_info,
-		pViewportState = &viewport_state_create_info,
-		pColorBlendState = &colorblend_create_info,
-		layout = layout,
-		renderPass = render_pass,
-		subpass = 0,
-		basePipelineHandle = vk.Pipeline{},
-		basePipelineIndex = -1
-	}
-
-	vk.CreateGraphicsPipelines(device, 0, 1, &graphics_pipeline_create_info, nil, &pipeline) or_return
-	return pipeline, .SUCCESS
-}
-
 CommandPoolResult :: union #shared_nil {
 	InternalDeviceResult,
 	vk.Result
@@ -741,7 +547,7 @@ allocate_command_buffers :: proc(device: vk.Device, command_pool: vk.CommandPool
 	return command_buffers, .SUCCESS
 }
 
-record_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_pass: vk.RenderPass, framebuffers: []vk.Framebuffer, window: glfw.WindowHandle, surface_details: SurfaceDetails, pipeline: vk.Pipeline, index: u32, vertex_buffer: vk.Buffer, vertices: []Vertex) -> (result: vk.Result) {
+record_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_pass: vk.RenderPass, framebuffers: []vk.Framebuffer, window: glfw.WindowHandle, surface_details: SurfaceDetails, pipeline: vk.Pipeline, index: u32, vertex_buffer: vk.Buffer, vertices: []graphics.Vertex) -> (result: vk.Result) {
 	vertex_buffer := vertex_buffer
 	vk.ResetCommandBuffer(command_buffer, {})
 	begin_info := vk.CommandBufferBeginInfo{
@@ -826,12 +632,7 @@ SubmitResult :: union #shared_nil {
 	InternalSubmitResult
 }
 
-submit_command_buffer :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, command_buffer: ^vk.CommandBuffer, surface: vk.SurfaceKHR, wait_semaphore: ^vk.Semaphore, signal_semaphore: ^vk.Semaphore, signal_fence: vk.Fence) -> (result: SubmitResult) {
-	graphics_family_index, surface_family_index, ok := supports_queue_families(physical_device, surface)
-	if !ok {
-		return InternalSubmitResult.QUEUE_FAMILY_NOT_SUPPORTED
-	}
-
+submit_command_buffer :: proc(graphics_family_index: u32, device: vk.Device, command_buffer: ^vk.CommandBuffer, wait_semaphore: ^vk.Semaphore, signal_semaphore: ^vk.Semaphore, signal_fence: vk.Fence) -> (result: SubmitResult) {
 	queue: vk.Queue
 	vk.GetDeviceQueue(device, graphics_family_index, 0, &queue)
 
@@ -861,12 +662,8 @@ PresentResult :: union #shared_nil {
 	InternalPresentResult
 }
 
-present_image :: proc(physical_device: vk.PhysicalDevice, surface: vk.SurfaceKHR, device: vk.Device, swapchain: ^vk.SwapchainKHR, wait_semaphore: ^vk.Semaphore, index: u32) -> (result: PresentResult) {
+present_image :: proc(surface_family_index: u32, device: vk.Device, swapchain: ^vk.SwapchainKHR, wait_semaphore: ^vk.Semaphore, index: u32) -> (result: PresentResult) {
 	index := index
-	graphics_family_index, surface_family_index, ok := supports_queue_families(physical_device, surface)
-	if !ok {
-		return InternalPresentResult.QUEUE_FAMILY_NOT_SUPPORTED
-	}
 
 	queue: vk.Queue
 	vk.GetDeviceQueue(device, surface_family_index, 0, &queue)
@@ -988,7 +785,7 @@ get_memory_info :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, b
 	return memory_requirements, memory_type_index, result
 }
 
-create_transfer_command_pool :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, surface: vk.SurfaceKHR) -> (command_pool: vk.CommandPool, result: CommandPoolResult) {
+create_transient_command_pool :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, surface: vk.SurfaceKHR) -> (command_pool: vk.CommandPool, result: CommandPoolResult) {
 	indices := get_queue_family_indices(physical_device, surface) or_return
 	defer delete(indices)
 
@@ -1030,15 +827,11 @@ record_transfer_command_buffer :: proc(device: vk.Device, command_buffer: vk.Com
 	return .SUCCESS
 }
 
-submit_transfer_command_buffer :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, surface: vk.SurfaceKHR, command_buffer: vk.CommandBuffer) -> (result: SubmitResult) {
+submit_transfer_command_buffer :: proc(transfer_family_index: u32, device: vk.Device, command_buffer: vk.CommandBuffer) -> (result: SubmitResult) {
 	command_buffer := command_buffer
-	graphics_family_index, surface_family_index, ok := supports_queue_families(physical_device, surface)
-	if !ok {
-		return InternalSubmitResult.QUEUE_FAMILY_NOT_SUPPORTED
-	}
 
 	queue: vk.Queue
-	vk.GetDeviceQueue(device, graphics_family_index, 0, &queue)
+	vk.GetDeviceQueue(device, transfer_family_index, 0, &queue)
 
 	submit_info := vk.SubmitInfo{
 		sType = .SUBMIT_INFO,
@@ -1052,6 +845,73 @@ submit_transfer_command_buffer :: proc(physical_device: vk.PhysicalDevice, devic
 	vk.WaitForFences(device, 1, &fence, b32(true), bits.U64_MAX)
 	vk.DestroyFence(device, fence, nil)
 	return result
+}
+
+draw :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, swapchain: ^vk.SwapchainKHR, acquire_semaphores: []vk.Semaphore, draw_semaphores: []vk.Semaphore, window: glfw.WindowHandle, swapchain_images: ^[]vk.Image, views: ^[]vk.ImageView, framebuffers: ^[]vk.Framebuffer, render_pass: vk.RenderPass, command_buffers: []vk.CommandBuffer, pipeline: vk.Pipeline, in_flight_fences: []vk.Fence, in_flight_index: int, surface: vk.SurfaceKHR, surface_details: ^SurfaceDetails, vertex_buffer: vk.Buffer, vertices: []graphics.Vertex, resized: ^bool, graphics_family_index: u32, surface_family_index: u32) {
+	swapchain_images := swapchain_images
+	views := views
+	framebuffers := framebuffers
+
+	index, acquire_result := acquire_swapchain_image(device, swapchain^, &in_flight_fences[in_flight_index], acquire_semaphores[in_flight_index])
+	if acquire_result == .ERROR_OUT_OF_DATE_KHR {
+		recreate_swapchain(window, surface, physical_device, device, surface_details, swapchain, swapchain_images, views, framebuffers, render_pass)
+		return
+	} else if acquire_result != .SUCCESS && acquire_result != .SUBOPTIMAL_KHR {
+		log_panic(acquire_result)
+	} else {
+		vk.ResetFences(device, 1, &in_flight_fences[in_flight_index])
+	}
+
+	record_result := record_command_buffer(command_buffers[in_flight_index], render_pass, framebuffers^, window, surface_details^, pipeline, index, vertex_buffer, vertices[:])
+	log_panic(record_result)
+
+	submit_result := submit_command_buffer(graphics_family_index, device, &command_buffers[in_flight_index], &acquire_semaphores[in_flight_index], &draw_semaphores[index], in_flight_fences[in_flight_index])
+	log_panic(submit_result)
+
+	present_result := present_image(surface_family_index, device, swapchain, &draw_semaphores[index], index)
+	if present_result == .ERROR_OUT_OF_DATE_KHR || present_result == .SUBOPTIMAL_KHR || resized^ {
+		resized^ = false
+		recreate_swapchain(window, surface, physical_device, device, surface_details, swapchain, swapchain_images, views, framebuffers, render_pass)
+	}
+}
+
+SetupBufferResult :: union #shared_nil {
+	vk.Result,
+	MemoryTypeResult,
+	SubmitResult
+}
+
+setup_buffer :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, transfer_family_index: u32, usage: vk.BufferUsageFlags, size: vk.DeviceSize, data: rawptr, command_pool: vk.CommandPool) -> (buffer: vk.Buffer, memory: vk.DeviceMemory, result: SetupBufferResult) {
+	staging_buffer := create_buffer(device, size, {.TRANSFER_SRC}) or_return
+	staging_memory_requirements, staging_memory_type_index := get_memory_info(physical_device, device, staging_buffer, {.HOST_VISIBLE, .HOST_COHERENT}) or_return
+	staging_memory := allocate_buffer(device, staging_memory_requirements, staging_memory_type_index) or_return
+	vk.BindBufferMemory(device, staging_buffer, staging_memory, 0) or_return
+
+	mapped_data: rawptr
+	log_panic(vk.MapMemory(device, staging_memory, 0, size, {}, &mapped_data))
+	mem.copy(mapped_data, data, int(size))
+	vk.UnmapMemory(device, staging_memory)
+
+	buffer = create_buffer(device, size, {.TRANSFER_DST} + usage) or_return
+	memory_requirements, memory_type_index := get_memory_info(physical_device, device, buffer, {.DEVICE_LOCAL}) or_return
+	memory = allocate_buffer(device, memory_requirements, memory_type_index) or_return
+	vk.BindBufferMemory(device, buffer, memory, 0) or_return
+
+	{
+		transfer_command_buffer := allocate_transfer_command_buffer(device, command_pool) or_return
+		defer vk.FreeCommandBuffers(device, command_pool, 1, &transfer_command_buffer)
+		record_transfer_command_buffer(device, transfer_command_buffer, staging_buffer, buffer, size) or_return
+		submit_transfer_command_buffer(transfer_family_index, device, transfer_command_buffer) or_return
+		vk.DestroyBuffer(device, staging_buffer, nil)
+		vk.FreeMemory(device, staging_memory, nil)
+	}
+
+	return buffer, memory, nil
+}
+
+destroy_buffer :: proc(device: vk.Device, buffer: vk.Buffer, memory: vk.DeviceMemory) {
+	vk.FreeMemory(device, memory, nil)
+	vk.DestroyBuffer(device, buffer, nil)
 }
 
 main :: proc() {
@@ -1115,6 +975,12 @@ main :: proc() {
 
 	physical_device, physical_device_result := get_physical_device(instance, surface)
 	log_panic(physical_device_result)
+
+	graphics_family_index, surface_family_index, ok := supports_queue_families(physical_device, surface)
+	if !ok {
+		log.panic("failed to get queue family indices")
+	}
+
 	device, device_result := create_device(physical_device, surface)
 	log_panic(device_result)
 	defer vk.DestroyDevice(device, nil)
@@ -1134,65 +1000,37 @@ main :: proc() {
 	log_panic(views_result)
 	defer destroy_image_views(device, views)
 
-	triangle_fragment_shader, fragment_shader_result := create_shader_module(device, #load("shaders/triangle/frag.spv", []u32))
-	triangle_vertex_shader, vertex_shader_result := create_shader_module(device, #load("shaders/triangle/vert.spv", []u32))
+	triangle_fragment_shader, fragment_shader_result := graphics.create_shader_module(device, #load("shaders/triangle/frag.spv", []u32))
+	triangle_vertex_shader, vertex_shader_result := graphics.create_shader_module(device, #load("shaders/triangle/vert.spv", []u32))
 	log_panic(fragment_shader_result)
 	log_panic(vertex_shader_result)
 
-	render_pass, render_pass_result := create_render_pass(device)
+	render_pass, render_pass_result := graphics.create_render_pass(device)
 	log_panic(render_pass_result)
 	defer vk.DestroyRenderPass(device, render_pass, nil)
 
-	pipeline_layout, pipeline_layout_result := create_pipeline_layout(device)
+	pipeline_layout, pipeline_layout_result := graphics.create_pipeline_layout(device)
 	log_panic(pipeline_layout_result)
 	defer vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 
-	vertices := [?]Vertex{
-		Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
-		Vertex{linalg.Vector3f32{-.5, .5, 0}, linalg.Vector3f32{0., 1., 0.}},
-		Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
-		// Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
-		// Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
-		// Vertex{linalg.Vector3f32{.5, -.5, 0}, linalg.Vector3f32{1., 0., 0.}},
+	vertices := [?]graphics.Vertex{
+		graphics.Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
+		graphics.Vertex{linalg.Vector3f32{-.5, .5, 0}, linalg.Vector3f32{0., 1., 0.}},
+		graphics.Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
+		graphics.Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
+		graphics.Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
+		graphics.Vertex{linalg.Vector3f32{.5, -.5, 0}, linalg.Vector3f32{1., 0., 0.}},
 	}
 
-	staging_buffer, staging_buffer_result := create_buffer(device, size_of(vertices[0]) * len(vertices), {.TRANSFER_SRC})
-	log_panic(staging_buffer_result)
-	staging_memory_requirements, staging_memory_type_index, staging_memory_info_result := get_memory_info(physical_device, device, staging_buffer, {.HOST_VISIBLE, .HOST_COHERENT})
-	log_panic(staging_memory_info_result)
-	staging_memory, staging_memory_allocate_result := allocate_buffer(device, staging_memory_requirements, staging_memory_type_index)
-	log_panic(staging_memory_allocate_result)
-	log_panic(vk.BindBufferMemory(device, staging_buffer, staging_memory, 0))
+	transient_command_pool, transient_command_pool_result := create_transient_command_pool(physical_device, device, surface)
+	log_panic(transient_command_pool_result)
+	defer vk.DestroyCommandPool(device, transient_command_pool, nil)
 
-	mapped_data: rawptr
-	log_panic(vk.MapMemory(device, staging_memory, 0, size_of(vertices[0]) * len(vertices), {}, &mapped_data))
-	mem.copy(mapped_data, raw_data(vertices[:]), size_of(vertices[0]) * len(vertices))
-	vk.UnmapMemory(device, staging_memory)
-
-	vertex_buffer, vertex_buffer_result := create_buffer(device, size_of(vertices[0]) * len(vertices), {.TRANSFER_DST, .VERTEX_BUFFER})
+	vertex_buffer, vertex_memory, vertex_buffer_result := setup_buffer(physical_device, device, graphics_family_index, {.VERTEX_BUFFER}, len(vertices) * size_of(vertices[0]), raw_data(vertices[:]), transient_command_pool)
 	log_panic(vertex_buffer_result)
-	defer vk.DestroyBuffer(device, vertex_buffer, nil)
-	vertex_memory_requirements, vertex_memory_type_index, vertex_memory_info_result := get_memory_info(physical_device, device, vertex_buffer, {.DEVICE_LOCAL})
-	log_panic(vertex_memory_info_result)
-	vertex_memory, vertex_memory_allocate_result := allocate_buffer(device, vertex_memory_requirements, vertex_memory_type_index)
-	log_panic(vertex_memory_allocate_result)
-	defer vk.FreeMemory(device, vertex_memory, nil)
-	log_panic(vk.BindBufferMemory(device, vertex_buffer, vertex_memory, 0))
-
-	{
-		transfer_command_pool, transfer_command_pool_result := create_transfer_command_pool(physical_device, device, surface)
-		log_panic(transfer_command_pool_result)
-		defer vk.DestroyCommandPool(device, transfer_command_pool, nil)
-		transfer_command_buffer, transfer_command_buffer_result := allocate_transfer_command_buffer(device, transfer_command_pool)
-		log_panic(transfer_command_buffer_result)
-		defer vk.FreeCommandBuffers(device, transfer_command_pool, 1, &transfer_command_buffer)
-		log_panic(record_transfer_command_buffer(device, transfer_command_buffer, staging_buffer, vertex_buffer, size_of(vertices[0]) * len(vertices)))
-		log_panic(submit_transfer_command_buffer(physical_device, device, surface, transfer_command_buffer))
-		vk.DestroyBuffer(device, staging_buffer, nil)
-		vk.FreeMemory(device, staging_memory, nil)
-	}
-
-	pipeline, pipeline_result := create_pipeline(device, triangle_fragment_shader, triangle_vertex_shader, render_pass, pipeline_layout, vertices[:])
+	defer destroy_buffer(device, vertex_buffer, vertex_memory)
+	
+	pipeline, pipeline_result := graphics.create_pipeline(device, triangle_fragment_shader, triangle_vertex_shader, render_pass, pipeline_layout, vertices[:])
 	log_panic(pipeline_result)
 	defer vk.DestroyPipeline(device, pipeline, nil)
 
@@ -1205,13 +1043,13 @@ main :: proc() {
 		delete(framebuffers)
 	}
 
-	command_pool, command_pool_result := create_command_pool(device, physical_device, surface)
-	log_panic(command_pool_result)
-	defer vk.DestroyCommandPool(device, command_pool, nil)
+	reset_command_pool, reset_command_pool_result := create_command_pool(device, physical_device, surface)
+	log_panic(reset_command_pool_result)
+	defer vk.DestroyCommandPool(device, reset_command_pool, nil)
 
-	command_buffers, command_buffer_result := allocate_command_buffers(device, command_pool, frames_in_flight)
-	defer delete(command_buffers)
-	log_panic(command_buffer_result)
+	graphics_command_buffers, graphics_command_buffer_result := allocate_command_buffers(device, reset_command_pool, frames_in_flight)
+	defer delete(graphics_command_buffers)
+	log_panic(graphics_command_buffer_result)
 
 	acquire_semaphores := make([]vk.Semaphore, len(swapchain_images))
 	draw_semaphores := make([]vk.Semaphore, len(swapchain_images))
@@ -1259,28 +1097,7 @@ main :: proc() {
 
 	for in_flight_index := 0; !glfw.WindowShouldClose(window); {
 		glfw.PollEvents()
-		index, acquire_result := acquire_swapchain_image(device, swapchain, &in_flight_fences[in_flight_index], acquire_semaphores[in_flight_index])
-		if acquire_result == .ERROR_OUT_OF_DATE_KHR {
-			recreate_swapchain(window, surface, physical_device, device, &surface_details, &swapchain, &swapchain_images, &views, &framebuffers, render_pass)
-			continue
-		} else if acquire_result != .SUCCESS && acquire_result != .SUBOPTIMAL_KHR {
-			log_panic(acquire_result)
-		} else {
-			vk.ResetFences(device, 1, &in_flight_fences[in_flight_index])
-		}
-
-		record_result := record_command_buffer(command_buffers[in_flight_index], render_pass, framebuffers, window, surface_details, pipeline, index, vertex_buffer, vertices[:])
-		log_panic(record_result)
-
-		submit_result := submit_command_buffer(physical_device, device, &command_buffers[in_flight_index], surface, &acquire_semaphores[in_flight_index], &draw_semaphores[index], in_flight_fences[in_flight_index])
-		log_panic(submit_result)
-
-		present_result := present_image(physical_device, surface, device, &swapchain, &draw_semaphores[index], index)
-		if present_result == .ERROR_OUT_OF_DATE_KHR || present_result == .SUBOPTIMAL_KHR || resized {
-			resized = false
-			recreate_swapchain(window, surface, physical_device, device, &surface_details, &swapchain, &swapchain_images, &views, &framebuffers, render_pass)
-		}
-
+		draw(physical_device, device, &swapchain, acquire_semaphores, draw_semaphores, window, &swapchain_images, &views, &framebuffers, render_pass, graphics_command_buffers, pipeline, in_flight_fences, in_flight_index, surface, &surface_details, vertex_buffer, vertices[:], &resized, graphics_family_index, surface_family_index)
 		in_flight_index = (in_flight_index + 1) % frames_in_flight
 	}
 
