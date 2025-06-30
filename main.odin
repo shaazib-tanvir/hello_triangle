@@ -547,7 +547,7 @@ allocate_command_buffers :: proc(device: vk.Device, command_pool: vk.CommandPool
 	return command_buffers, .SUCCESS
 }
 
-record_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_pass: vk.RenderPass, framebuffers: []vk.Framebuffer, window: glfw.WindowHandle, surface_details: SurfaceDetails, pipeline: vk.Pipeline, index: u32, vertex_buffer: vk.Buffer, vertices: []graphics.Vertex) -> (result: vk.Result) {
+record_graphics_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_pass: vk.RenderPass, framebuffers: []vk.Framebuffer, window: glfw.WindowHandle, surface_details: SurfaceDetails, pipeline: vk.Pipeline, index: u32, vertex_buffer: vk.Buffer, index_buffer: vk.Buffer, vertices: []graphics.Vertex, indices: []u32) -> (result: vk.Result) {
 	vertex_buffer := vertex_buffer
 	vk.ResetCommandBuffer(command_buffer, {})
 	begin_info := vk.CommandBufferBeginInfo{
@@ -591,7 +591,8 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_pass: vk.
 	vk.CmdBindPipeline(command_buffer, .GRAPHICS, pipeline)
 	vk.CmdSetViewport(command_buffer, 0, 1, &viewport)
 	vk.CmdSetScissor(command_buffer, 0, 1, &scissor)
-	vk.CmdDraw(command_buffer, u32(len(vertices)), 1, 0, 0)
+	vk.CmdBindIndexBuffer(command_buffer, index_buffer, 0, .UINT32)
+	vk.CmdDrawIndexed(command_buffer, u32(len(indices)), 1, 0, 0, 0)
 	vk.CmdEndRenderPass(command_buffer)
 
 	vk.EndCommandBuffer(command_buffer) or_return
@@ -632,7 +633,7 @@ SubmitResult :: union #shared_nil {
 	InternalSubmitResult
 }
 
-submit_command_buffer :: proc(graphics_family_index: u32, device: vk.Device, command_buffer: ^vk.CommandBuffer, wait_semaphore: ^vk.Semaphore, signal_semaphore: ^vk.Semaphore, signal_fence: vk.Fence) -> (result: SubmitResult) {
+submit_graphics_command_buffer :: proc(graphics_family_index: u32, device: vk.Device, command_buffer: ^vk.CommandBuffer, wait_semaphore: ^vk.Semaphore, signal_semaphore: ^vk.Semaphore, signal_fence: vk.Fence) -> (result: SubmitResult) {
 	queue: vk.Queue
 	vk.GetDeviceQueue(device, graphics_family_index, 0, &queue)
 
@@ -847,7 +848,7 @@ submit_transfer_command_buffer :: proc(transfer_family_index: u32, device: vk.De
 	return result
 }
 
-draw :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, swapchain: ^vk.SwapchainKHR, acquire_semaphores: []vk.Semaphore, draw_semaphores: []vk.Semaphore, window: glfw.WindowHandle, swapchain_images: ^[]vk.Image, views: ^[]vk.ImageView, framebuffers: ^[]vk.Framebuffer, render_pass: vk.RenderPass, command_buffers: []vk.CommandBuffer, pipeline: vk.Pipeline, in_flight_fences: []vk.Fence, in_flight_index: int, surface: vk.SurfaceKHR, surface_details: ^SurfaceDetails, vertex_buffer: vk.Buffer, vertices: []graphics.Vertex, resized: ^bool, graphics_family_index: u32, surface_family_index: u32) {
+draw :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, swapchain: ^vk.SwapchainKHR, acquire_semaphores: []vk.Semaphore, draw_semaphores: []vk.Semaphore, window: glfw.WindowHandle, swapchain_images: ^[]vk.Image, views: ^[]vk.ImageView, framebuffers: ^[]vk.Framebuffer, render_pass: vk.RenderPass, command_buffers: []vk.CommandBuffer, pipeline: vk.Pipeline, in_flight_fences: []vk.Fence, in_flight_index: int, surface: vk.SurfaceKHR, surface_details: ^SurfaceDetails, vertex_buffer: vk.Buffer, index_buffer: vk.Buffer, vertices: []graphics.Vertex, indices: []u32, resized: ^bool, graphics_family_index: u32, surface_family_index: u32) {
 	swapchain_images := swapchain_images
 	views := views
 	framebuffers := framebuffers
@@ -862,10 +863,10 @@ draw :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, swapchain: ^
 		vk.ResetFences(device, 1, &in_flight_fences[in_flight_index])
 	}
 
-	record_result := record_command_buffer(command_buffers[in_flight_index], render_pass, framebuffers^, window, surface_details^, pipeline, index, vertex_buffer, vertices[:])
+	record_result := record_graphics_command_buffer(command_buffers[in_flight_index], render_pass, framebuffers^, window, surface_details^, pipeline, index, vertex_buffer, index_buffer, vertices[:], indices[:])
 	log_panic(record_result)
 
-	submit_result := submit_command_buffer(graphics_family_index, device, &command_buffers[in_flight_index], &acquire_semaphores[in_flight_index], &draw_semaphores[index], in_flight_fences[in_flight_index])
+	submit_result := submit_graphics_command_buffer(graphics_family_index, device, &command_buffers[in_flight_index], &acquire_semaphores[in_flight_index], &draw_semaphores[index], in_flight_fences[in_flight_index])
 	log_panic(submit_result)
 
 	present_result := present_image(surface_family_index, device, swapchain, &draw_semaphores[index], index)
@@ -1017,10 +1018,10 @@ main :: proc() {
 		graphics.Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
 		graphics.Vertex{linalg.Vector3f32{-.5, .5, 0}, linalg.Vector3f32{0., 1., 0.}},
 		graphics.Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
-		graphics.Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
-		graphics.Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
 		graphics.Vertex{linalg.Vector3f32{.5, -.5, 0}, linalg.Vector3f32{1., 0., 0.}},
 	}
+
+	indices := [?]u32{0, 1, 2, 0, 2, 3}
 
 	transient_command_pool, transient_command_pool_result := create_transient_command_pool(physical_device, device, surface)
 	log_panic(transient_command_pool_result)
@@ -1029,6 +1030,9 @@ main :: proc() {
 	vertex_buffer, vertex_memory, vertex_buffer_result := setup_buffer(physical_device, device, graphics_family_index, {.VERTEX_BUFFER}, len(vertices) * size_of(vertices[0]), raw_data(vertices[:]), transient_command_pool)
 	log_panic(vertex_buffer_result)
 	defer destroy_buffer(device, vertex_buffer, vertex_memory)
+
+	index_buffer, index_memory, index_buffer_result := setup_buffer(physical_device, device, graphics_family_index, {.INDEX_BUFFER}, len(indices) * size_of(indices[0]), raw_data(indices[:]), transient_command_pool)
+	defer destroy_buffer(device, index_buffer, index_memory)
 	
 	pipeline, pipeline_result := graphics.create_pipeline(device, triangle_fragment_shader, triangle_vertex_shader, render_pass, pipeline_layout, vertices[:])
 	log_panic(pipeline_result)
@@ -1097,7 +1101,7 @@ main :: proc() {
 
 	for in_flight_index := 0; !glfw.WindowShouldClose(window); {
 		glfw.PollEvents()
-		draw(physical_device, device, &swapchain, acquire_semaphores, draw_semaphores, window, &swapchain_images, &views, &framebuffers, render_pass, graphics_command_buffers, pipeline, in_flight_fences, in_flight_index, surface, &surface_details, vertex_buffer, vertices[:], &resized, graphics_family_index, surface_family_index)
+		draw(physical_device, device, &swapchain, acquire_semaphores, draw_semaphores, window, &swapchain_images, &views, &framebuffers, render_pass, graphics_command_buffers, pipeline, in_flight_fences, in_flight_index, surface, &surface_details, vertex_buffer, index_buffer, vertices[:], indices[:], &resized, graphics_family_index, surface_family_index)
 		in_flight_index = (in_flight_index + 1) % frames_in_flight
 	}
 
