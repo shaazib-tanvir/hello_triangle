@@ -144,7 +144,7 @@ parse_obj :: proc(contents: string) -> (vertices: [dynamic]graphics.Vertex, indi
 				return
 			}
 			vertex.position = value
-			vertex.color = linalg.Vector3f32{1., 1., 1.}
+			vertex.color = linalg.Vector3f32{.75, .75, .75}
 			append(&vertices, vertex)
 		case "vn":
 			normal, ok := parse_vector3(line_number, line, elements[1:])

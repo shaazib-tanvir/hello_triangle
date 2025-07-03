@@ -963,7 +963,7 @@ create_descriptor_set_layout :: proc(device: vk.Device, binding_count: u32) -> (
 			binding = i,
 			descriptorType = .UNIFORM_BUFFER,
 			descriptorCount = 1,
-			stageFlags = {.VERTEX},
+			stageFlags = {.VERTEX, .FRAGMENT},
 		}
 	}
 
@@ -977,10 +977,10 @@ create_descriptor_set_layout :: proc(device: vk.Device, binding_count: u32) -> (
 	return layout, .SUCCESS
 }
 
-create_descriptor_pool :: proc(device: vk.Device, max_sets: u32) -> (pool: vk.DescriptorPool, result: vk.Result) {
+create_descriptor_pool :: proc(device: vk.Device, max_sets: u32, count: u32) -> (pool: vk.DescriptorPool, result: vk.Result) {
 	pool_size := vk.DescriptorPoolSize{
 		type = .UNIFORM_BUFFER,
-		descriptorCount = frames_in_flight
+		descriptorCount = frames_in_flight * count
 	}
 
 	pool_create_info := vk.DescriptorPoolCreateInfo{
@@ -1120,6 +1120,11 @@ ModelViewProjection :: struct {
 	projection: linalg.Matrix4f32,
 }
 
+LightInfo :: struct {
+	light_position: linalg.Vector3f32,
+	camera_position: linalg.Vector3f32,
+}
+
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
@@ -1221,20 +1226,6 @@ main :: proc() {
 	defer delete(vertices)
 	defer delete(indices)
 	log_panic(result)
-	
-	// vertices := [?]graphics.Vertex{
-	// 	graphics.Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
-	// 	graphics.Vertex{linalg.Vector3f32{-.5, .5, 0}, linalg.Vector3f32{0., 1., 0.}},
-	// 	graphics.Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
-	// 	graphics.Vertex{linalg.Vector3f32{.5, -.5, 0}, linalg.Vector3f32{1., 0., 0.}},
-	//
-	// 	graphics.Vertex{linalg.Vector3f32{-1.5, -1.5, .5}, linalg.Vector3f32{1., 0.5, 0.}},
-	// 	graphics.Vertex{linalg.Vector3f32{-1.5, 1.5, .5}, linalg.Vector3f32{0., 1., 1.}},
-	// 	graphics.Vertex{linalg.Vector3f32{1.5, 1.5, .5}, linalg.Vector3f32{0., 0., 1.}},
-	// 	graphics.Vertex{linalg.Vector3f32{1.5, -1.5, .5}, linalg.Vector3f32{0., 1., 0.5}},
-	// }
-	//
-	// indices := [?]u32{0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7}
 
 	transient_command_pool, transient_command_pool_result := create_transient_command_pool(physical_device, device, surface)
 	log_panic(transient_command_pool_result)
@@ -1248,11 +1239,11 @@ main :: proc() {
 	log_panic(index_buffer_result)
 	defer destroy_buffer(device, index_buffer, index_memory)
 
-	descriptor_set_layout, descriptor_set_layout_result := create_descriptor_set_layout(device, 1)
+	descriptor_set_layout, descriptor_set_layout_result := create_descriptor_set_layout(device, 2)
 	log_panic(descriptor_set_layout_result)
 	defer vk.DestroyDescriptorSetLayout(device, descriptor_set_layout, nil)
 
-	descriptor_pool, descriptor_pool_result := create_descriptor_pool(device, frames_in_flight)
+	descriptor_pool, descriptor_pool_result := create_descriptor_pool(device, frames_in_flight, 2)
 	log_panic(descriptor_pool_result)
 	defer vk.DestroyDescriptorPool(device, descriptor_pool, nil)
 
@@ -1263,7 +1254,7 @@ main :: proc() {
 	uniform_buffers_set: [frames_in_flight][]vk.Buffer
 	uniform_buffer_memories_set: [frames_in_flight][]vk.DeviceMemory
 	for i in 0..<frames_in_flight {
-		sizes := [?]vk.DeviceSize{size_of(ModelViewProjection)}
+		sizes := [?]vk.DeviceSize{size_of(ModelViewProjection), size_of(LightInfo)}
 		buffers, memories, uniform_buffer_result := setup_uniform_buffer(physical_device, device, transient_command_pool, sizes[:])
 		log_panic(uniform_buffer_result)
 		uniform_buffers_set[i] = buffers
@@ -1277,14 +1268,21 @@ main :: proc() {
 
 	extent := get_extent(window, surface_details)
 	mvp := ModelViewProjection{
-		model = linalg.MATRIX4F32_IDENTITY * flip_yz_transform,
+		model = flip_yz_transform,
 		view = linalg.matrix4_translate_f32([3]f32{0., 0., 3.}),
 		projection = perspective_transform(0.5, 5., f32(extent.width) / f32(extent.height), 1.5)
 	}
 
+	light_info := LightInfo{
+		light_position = [3]f32{-2., 5., 4.},
+		camera_position = [3]f32{0., 0., -3.}
+	}
+
 	for i in 0..<frames_in_flight {
 		update_uniform(device, uniform_buffer_memories_set[i][0], &mvp, size_of(ModelViewProjection))
+		update_uniform(device, uniform_buffer_memories_set[i][1], &light_info, size_of(LightInfo))
 		write_descriptor_set(device, descriptor_sets[i], 0, uniform_buffers_set[i][0])
+		write_descriptor_set(device, descriptor_sets[i], 1, uniform_buffers_set[i][1])
 	}
 	
 	triangle_fragment_shader, fragment_shader_result := graphics.create_shader_module(device, #load("shaders/triangle_lit/frag.spv", []u32))
