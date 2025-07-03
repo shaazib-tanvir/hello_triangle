@@ -2,19 +2,22 @@ package main
 
 import "base:runtime"
 import "core:math/linalg"
+import "core:time"
 import "core:log"
 import "core:fmt"
 import "core:reflect"
 import "core:mem"
 import "core:slice"
-import "core:strings"
+import "core:math"
 import "core:math/bits"
 import "core:container/priority_queue"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 import "graphics"
+import "loader"
 
 g_context: runtime.Context
+frames_in_flight :: 2
 
 error_callback :: proc "c" (error: i32, description: cstring) {
 	context = g_context
@@ -514,15 +517,16 @@ create_command_pool :: proc(device: vk.Device, physical_device: vk.PhysicalDevic
 	return command_pool, vk.Result.SUCCESS
 }
 
-create_framebuffers :: proc(device: vk.Device, views: []vk.ImageView, render_pass: vk.RenderPass, surface_details: SurfaceDetails, window: glfw.WindowHandle) -> (framebuffers: []vk.Framebuffer, result: vk.Result) {
+create_framebuffers :: proc(device: vk.Device, swapchain_views: []vk.ImageView, depth_view: vk.ImageView, render_pass: vk.RenderPass, surface_details: SurfaceDetails, window: glfw.WindowHandle) -> (framebuffers: []vk.Framebuffer, result: vk.Result) {
 	extent := get_extent(window, surface_details)
-	framebuffers = make([]vk.Framebuffer, len(views))
-	for i in 0..<len(views) {
+	framebuffers = make([]vk.Framebuffer, len(swapchain_views))
+	for i in 0..<len(swapchain_views) {
+		views := [?]vk.ImageView{swapchain_views[i], depth_view}
 		framebuffer_create_info := vk.FramebufferCreateInfo{
 			sType = .FRAMEBUFFER_CREATE_INFO,
 			renderPass = render_pass,
-			attachmentCount = 1,
-			pAttachments = &views[i],
+			attachmentCount = 2,
+			pAttachments = raw_data(views[:]),
 			width = extent.width,
 			height = extent.height,
 			layers = 1
@@ -547,8 +551,10 @@ allocate_command_buffers :: proc(device: vk.Device, command_pool: vk.CommandPool
 	return command_buffers, .SUCCESS
 }
 
-record_graphics_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_pass: vk.RenderPass, framebuffers: []vk.Framebuffer, window: glfw.WindowHandle, surface_details: SurfaceDetails, pipeline: vk.Pipeline, index: u32, vertex_buffer: vk.Buffer, index_buffer: vk.Buffer, vertices: []graphics.Vertex, indices: []u32) -> (result: vk.Result) {
+record_graphics_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_pass: vk.RenderPass, framebuffers: []vk.Framebuffer, window: glfw.WindowHandle, surface_details: SurfaceDetails, pipeline: vk.Pipeline, index: u32, vertex_buffer: vk.Buffer, index_buffer: vk.Buffer, vertices: []graphics.Vertex, indices: []u32, descriptor_set: vk.DescriptorSet, layout: vk.PipelineLayout) -> (result: vk.Result) {
 	vertex_buffer := vertex_buffer
+	descriptor_set := descriptor_set
+
 	vk.ResetCommandBuffer(command_buffer, {})
 	begin_info := vk.CommandBufferBeginInfo{
 		sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -557,7 +563,7 @@ record_graphics_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_
 	
 	extent := get_extent(window, surface_details)
 
-	clear_values := [?]vk.ClearValue{vk.ClearValue{color = vk.ClearColorValue{float32 = [4]f32{0., 0., 0., 0.}}}}
+	clear_values := [?]vk.ClearValue{vk.ClearValue{color = vk.ClearColorValue{float32 = [4]f32{0., 0., 0., 0.}}}, vk.ClearValue{depthStencil = vk.ClearDepthStencilValue{depth = 1.,}}}
 	render_pass_begin_info := vk.RenderPassBeginInfo{
 		sType = .RENDER_PASS_BEGIN_INFO,
 		renderPass = render_pass,
@@ -588,6 +594,7 @@ record_graphics_command_buffer :: proc(command_buffer: vk.CommandBuffer, render_
 
 	vk.CmdBeginRenderPass(command_buffer, &render_pass_begin_info, .INLINE)
 	vk.CmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer, &offset)
+	vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, layout, 0, 1, &descriptor_set, 0, nil)
 	vk.CmdBindPipeline(command_buffer, .GRAPHICS, pipeline)
 	vk.CmdSetViewport(command_buffer, 0, 1, &viewport)
 	vk.CmdSetScissor(command_buffer, 0, 1, &scissor)
@@ -701,9 +708,8 @@ FramebufferCallbackState :: struct{
 	device: vk.Device
 }
 
-frames_in_flight :: 2
 
-recreate_swapchain :: proc(window: glfw.WindowHandle, surface: vk.SurfaceKHR, physical_device: vk.PhysicalDevice, device: vk.Device, surface_details: ^SurfaceDetails, swapchain: ^vk.SwapchainKHR, swapchain_images: ^[]vk.Image, views: ^[]vk.ImageView, framebuffers: ^[]vk.Framebuffer, render_pass: vk.RenderPass) {
+recreate_swapchain :: proc(window: glfw.WindowHandle, surface: vk.SurfaceKHR, physical_device: vk.PhysicalDevice, device: vk.Device, surface_details: ^SurfaceDetails, swapchain: ^vk.SwapchainKHR, swapchain_images: ^[]vk.Image, views: ^[]vk.ImageView, depth_view: ^vk.ImageView, framebuffers: ^[]vk.Framebuffer, render_pass: vk.RenderPass) {
 	vk.DeviceWaitIdle(device)
 
 	destroy_surface_details(surface_details)
@@ -733,7 +739,7 @@ recreate_swapchain :: proc(window: glfw.WindowHandle, surface: vk.SurfaceKHR, ph
 	}
 	delete(framebuffers^)
 	framebuffers_result: vk.Result
-	framebuffers^, framebuffers_result = create_framebuffers(device, views^, render_pass, surface_details^, window)
+	framebuffers^, framebuffers_result = create_framebuffers(device, views^, depth_view^, render_pass, surface_details^, window)
 	log_panic(framebuffers_result)
 }
 
@@ -848,14 +854,14 @@ submit_transfer_command_buffer :: proc(transfer_family_index: u32, device: vk.De
 	return result
 }
 
-draw :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, swapchain: ^vk.SwapchainKHR, acquire_semaphores: []vk.Semaphore, draw_semaphores: []vk.Semaphore, window: glfw.WindowHandle, swapchain_images: ^[]vk.Image, views: ^[]vk.ImageView, framebuffers: ^[]vk.Framebuffer, render_pass: vk.RenderPass, command_buffers: []vk.CommandBuffer, pipeline: vk.Pipeline, in_flight_fences: []vk.Fence, in_flight_index: int, surface: vk.SurfaceKHR, surface_details: ^SurfaceDetails, vertex_buffer: vk.Buffer, index_buffer: vk.Buffer, vertices: []graphics.Vertex, indices: []u32, resized: ^bool, graphics_family_index: u32, surface_family_index: u32) {
+draw :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, swapchain: ^vk.SwapchainKHR, acquire_semaphores: []vk.Semaphore, draw_semaphores: []vk.Semaphore, window: glfw.WindowHandle, swapchain_images: ^[]vk.Image, views: ^[]vk.ImageView, depth_view: ^vk.ImageView, framebuffers: ^[]vk.Framebuffer, render_pass: vk.RenderPass, command_buffers: []vk.CommandBuffer, pipeline: vk.Pipeline, in_flight_fences: []vk.Fence, in_flight_index: int, surface: vk.SurfaceKHR, surface_details: ^SurfaceDetails, vertex_buffer: vk.Buffer, index_buffer: vk.Buffer, vertices: []graphics.Vertex, indices: []u32, resized: ^bool, graphics_family_index: u32, surface_family_index: u32, descriptor_set: vk.DescriptorSet, layout: vk.PipelineLayout) {
 	swapchain_images := swapchain_images
 	views := views
 	framebuffers := framebuffers
 
 	index, acquire_result := acquire_swapchain_image(device, swapchain^, &in_flight_fences[in_flight_index], acquire_semaphores[in_flight_index])
 	if acquire_result == .ERROR_OUT_OF_DATE_KHR {
-		recreate_swapchain(window, surface, physical_device, device, surface_details, swapchain, swapchain_images, views, framebuffers, render_pass)
+		recreate_swapchain(window, surface, physical_device, device, surface_details, swapchain, swapchain_images, views, depth_view, framebuffers, render_pass)
 		return
 	} else if acquire_result != .SUCCESS && acquire_result != .SUBOPTIMAL_KHR {
 		log_panic(acquire_result)
@@ -863,7 +869,7 @@ draw :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, swapchain: ^
 		vk.ResetFences(device, 1, &in_flight_fences[in_flight_index])
 	}
 
-	record_result := record_graphics_command_buffer(command_buffers[in_flight_index], render_pass, framebuffers^, window, surface_details^, pipeline, index, vertex_buffer, index_buffer, vertices[:], indices[:])
+	record_result := record_graphics_command_buffer(command_buffers[in_flight_index], render_pass, framebuffers^, window, surface_details^, pipeline, index, vertex_buffer, index_buffer, vertices[:], indices[:], descriptor_set, layout)
 	log_panic(record_result)
 
 	submit_result := submit_graphics_command_buffer(graphics_family_index, device, &command_buffers[in_flight_index], &acquire_semaphores[in_flight_index], &draw_semaphores[index], in_flight_fences[in_flight_index])
@@ -872,7 +878,7 @@ draw :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, swapchain: ^
 	present_result := present_image(surface_family_index, device, swapchain, &draw_semaphores[index], index)
 	if present_result == .ERROR_OUT_OF_DATE_KHR || present_result == .SUBOPTIMAL_KHR || resized^ {
 		resized^ = false
-		recreate_swapchain(window, surface, physical_device, device, surface_details, swapchain, swapchain_images, views, framebuffers, render_pass)
+		recreate_swapchain(window, surface, physical_device, device, surface_details, swapchain, swapchain_images, views, depth_view, framebuffers, render_pass)
 	}
 }
 
@@ -913,6 +919,205 @@ setup_buffer :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, tran
 destroy_buffer :: proc(device: vk.Device, buffer: vk.Buffer, memory: vk.DeviceMemory) {
 	vk.FreeMemory(device, memory, nil)
 	vk.DestroyBuffer(device, buffer, nil)
+}
+
+setup_uniform_buffer :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, pool: vk.CommandPool, sizes: []vk.DeviceSize) -> (buffers: []vk.Buffer, memories: []vk.DeviceMemory, result: SetupBufferResult) {
+	buffers = make([]vk.Buffer, len(sizes))
+	memories = make([]vk.DeviceMemory, len(sizes))
+
+	for i in 0..<len(sizes) {
+		buffers[i] = create_buffer(device, sizes[i], {.UNIFORM_BUFFER}) or_return
+		memory_requirements, memory_type_index := get_memory_info(physical_device, device, buffers[i], {.HOST_VISIBLE, .HOST_COHERENT}) or_return
+		memories[i] = allocate_buffer(device, memory_requirements, memory_type_index) or_return
+		vk.BindBufferMemory(device, buffers[i], memories[i], 0) or_return
+	}
+
+	return buffers, memories, nil
+}
+
+destroy_uniform_buffer :: proc(device: vk.Device, buffers: []vk.Buffer, memories: []vk.DeviceMemory) {
+	for &memory in memories {
+		vk.FreeMemory(device, memory, nil)
+	}
+
+	for &buffer in buffers {
+		vk.DestroyBuffer(device, buffer, nil)
+	}
+
+	delete(buffers)
+	delete(memories)
+}
+
+update_uniform :: proc(device: vk.Device, memory: vk.DeviceMemory, data: rawptr, size: vk.DeviceSize) {
+	mapped_data: rawptr
+	log_panic(vk.MapMemory(device, memory, 0, size, {}, &mapped_data))
+	mem.copy(mapped_data, data, int(size))
+	vk.UnmapMemory(device, memory)
+}
+
+create_descriptor_set_layout :: proc(device: vk.Device, binding_count: u32) -> (layout: vk.DescriptorSetLayout, result: vk.Result) {
+	layout_bindings := make([]vk.DescriptorSetLayoutBinding, binding_count)
+	defer delete(layout_bindings)
+	for i in 0..<binding_count {
+		layout_bindings[i] = vk.DescriptorSetLayoutBinding{
+			binding = i,
+			descriptorType = .UNIFORM_BUFFER,
+			descriptorCount = 1,
+			stageFlags = {.VERTEX},
+		}
+	}
+
+	layout_create_info := vk.DescriptorSetLayoutCreateInfo{
+		sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		bindingCount = binding_count,
+		pBindings = raw_data(layout_bindings)
+	}
+
+	vk.CreateDescriptorSetLayout(device, &layout_create_info, nil, &layout) or_return
+	return layout, .SUCCESS
+}
+
+create_descriptor_pool :: proc(device: vk.Device, max_sets: u32) -> (pool: vk.DescriptorPool, result: vk.Result) {
+	pool_size := vk.DescriptorPoolSize{
+		type = .UNIFORM_BUFFER,
+		descriptorCount = frames_in_flight
+	}
+
+	pool_create_info := vk.DescriptorPoolCreateInfo{
+		sType = .DESCRIPTOR_POOL_CREATE_INFO,
+		maxSets = max_sets,
+		poolSizeCount = 1,
+		pPoolSizes = &pool_size
+	}
+
+	vk.CreateDescriptorPool(device, &pool_create_info, nil, &pool) or_return
+	return pool, .SUCCESS
+}
+
+allocate_descriptor_sets :: proc(device: vk.Device, pool: vk.DescriptorPool, layout: vk.DescriptorSetLayout, count: u32) -> (descriptor_sets: []vk.DescriptorSet, result: vk.Result) {
+	layouts := make([]vk.DescriptorSetLayout, count)
+	defer delete(layouts)
+	descriptor_sets = make([]vk.DescriptorSet, count)
+	for &_layout in layouts {
+		_layout = layout
+	}
+
+	allocate_info := vk.DescriptorSetAllocateInfo{
+		sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+		descriptorPool = pool,
+		descriptorSetCount = count,
+		pSetLayouts = raw_data(layouts)
+	}
+
+	vk.AllocateDescriptorSets(device, &allocate_info, raw_data(descriptor_sets)) or_return
+	return descriptor_sets, .SUCCESS
+}
+
+write_descriptor_set :: proc(device: vk.Device, descriptor_set: vk.DescriptorSet, binding: u32, uniform_buffer: vk.Buffer) {
+	buffer_info := vk.DescriptorBufferInfo{
+		buffer = uniform_buffer,
+		offset = 0,
+		range = vk.DeviceSize(vk.WHOLE_SIZE)
+	}
+
+	write_desc := vk.WriteDescriptorSet{
+		sType = .WRITE_DESCRIPTOR_SET,
+		dstSet = descriptor_set,
+		dstBinding = binding,
+		descriptorCount = 1,
+		descriptorType = .UNIFORM_BUFFER,
+		pBufferInfo = &buffer_info
+	}
+
+	vk.UpdateDescriptorSets(device, 1, &write_desc, 0, nil)
+}
+
+ImageResult :: union #shared_nil {
+	vk.Result,
+	MemoryTypeResult
+}
+
+create_depth_image :: proc(physical_device: vk.PhysicalDevice, device: vk.Device, window: glfw.WindowHandle, surface_details: SurfaceDetails) -> (image: vk.Image, memory: vk.DeviceMemory, result: ImageResult) {
+	extent := get_extent(window, surface_details)
+
+	image_create_info := vk.ImageCreateInfo{
+		sType = .IMAGE_CREATE_INFO,
+		imageType = .D2,
+		format = .D32_SFLOAT,
+		extent = vk.Extent3D{extent.width, extent.height, 1}, 
+		mipLevels = 1,
+		arrayLayers = 1,
+		samples = {._1},
+		usage = {.DEPTH_STENCIL_ATTACHMENT},
+		sharingMode = .EXCLUSIVE,
+		tiling = .OPTIMAL,
+	}
+
+	vk.CreateImage(device, &image_create_info, nil, &image) or_return
+
+	requirements: vk.MemoryRequirements
+	vk.GetImageMemoryRequirements(device, image, &requirements)
+
+	index := find_memory_type(physical_device, requirements, {.DEVICE_LOCAL}) or_return
+	allocate_info := vk.MemoryAllocateInfo{
+		sType = .MEMORY_ALLOCATE_INFO,
+		allocationSize = requirements.size,
+		memoryTypeIndex = index,
+	}
+	vk.AllocateMemory(device, &allocate_info, nil, &memory) or_return
+	vk.BindImageMemory(device, image, memory, 0) or_return
+
+	return image, memory, nil 
+}
+
+create_depth_view :: proc(device: vk.Device, image: vk.Image) -> (view: vk.ImageView, result: vk.Result) {
+	image_view_create_info := vk.ImageViewCreateInfo{
+		sType = .IMAGE_VIEW_CREATE_INFO,
+		image = image,
+		viewType = .D2,
+		format = .D32_SFLOAT,
+		components = vk.ComponentMapping{
+			r = .R,
+			g = .G,
+			b = .B,
+			a = .A
+		},
+		subresourceRange = vk.ImageSubresourceRange{
+			aspectMask = {.DEPTH},
+			baseMipLevel = 0,
+			levelCount = 1,
+			baseArrayLayer = 0,
+			layerCount = 1
+		}
+	}
+
+	vk.CreateImageView(device, &image_view_create_info, nil, &view) or_return
+	return view, .SUCCESS
+}
+
+perspective_transform :: proc(near, far, aspect, fov: f32) -> linalg.Matrix4f32 {
+	result := linalg.Matrix4f32{}
+	c := 1.0 / math.tan(fov / 2.)
+	result[0, 0] = c / aspect
+	result[1, 1] = c
+	result[2, 2] = far / (far - near)
+	result[2, 3] = - (far * near) / (far - near)
+	result[3, 2] = 1.
+
+	return result
+}
+
+flip_yz_transform :: linalg.Matrix4f32{
+	1., 0., 0., 0.,
+	0., -1., 0., 0.,
+	0., 0., -1., 0.,
+	0., 0., 0., 1.,
+}
+
+ModelViewProjection :: struct {
+	model: linalg.Matrix4f32,
+	view: linalg.Matrix4f32,
+	projection: linalg.Matrix4f32,
 }
 
 main :: proc() {
@@ -997,12 +1202,93 @@ main :: proc() {
 	log_panic(swapchain_images_result)
 	defer delete(swapchain_images)
 
+	depth_image, depth_memory, depth_image_result := create_depth_image(physical_device, device, window, surface_details)
+	log_panic(depth_image_result)
+	defer {
+		vk.FreeMemory(device, depth_memory, nil)
+		vk.DestroyImage(device, depth_image, nil)
+	}
+
+	depth_view, depth_view_result := create_depth_view(device, depth_image)
+	log_panic(depth_view_result)
+	defer vk.DestroyImageView(device, depth_view, nil)
+
 	views, views_result := create_image_views(device, swapchain_images)
 	log_panic(views_result)
 	defer destroy_image_views(device, views)
 
-	triangle_fragment_shader, fragment_shader_result := graphics.create_shader_module(device, #load("shaders/triangle/frag.spv", []u32))
-	triangle_vertex_shader, vertex_shader_result := graphics.create_shader_module(device, #load("shaders/triangle/vert.spv", []u32))
+	vertices, indices, result := loader.parse_obj(#load("models/retopoflow_bulbasaur.obj", string))
+	defer delete(vertices)
+	defer delete(indices)
+	log_panic(result)
+	
+	// vertices := [?]graphics.Vertex{
+	// 	graphics.Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
+	// 	graphics.Vertex{linalg.Vector3f32{-.5, .5, 0}, linalg.Vector3f32{0., 1., 0.}},
+	// 	graphics.Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
+	// 	graphics.Vertex{linalg.Vector3f32{.5, -.5, 0}, linalg.Vector3f32{1., 0., 0.}},
+	//
+	// 	graphics.Vertex{linalg.Vector3f32{-1.5, -1.5, .5}, linalg.Vector3f32{1., 0.5, 0.}},
+	// 	graphics.Vertex{linalg.Vector3f32{-1.5, 1.5, .5}, linalg.Vector3f32{0., 1., 1.}},
+	// 	graphics.Vertex{linalg.Vector3f32{1.5, 1.5, .5}, linalg.Vector3f32{0., 0., 1.}},
+	// 	graphics.Vertex{linalg.Vector3f32{1.5, -1.5, .5}, linalg.Vector3f32{0., 1., 0.5}},
+	// }
+	//
+	// indices := [?]u32{0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7}
+
+	transient_command_pool, transient_command_pool_result := create_transient_command_pool(physical_device, device, surface)
+	log_panic(transient_command_pool_result)
+	defer vk.DestroyCommandPool(device, transient_command_pool, nil)
+
+	vertex_buffer, vertex_memory, vertex_buffer_result := setup_buffer(physical_device, device, graphics_family_index, {.VERTEX_BUFFER}, vk.DeviceSize(len(vertices) * size_of(vertices[0])), raw_data(vertices[:]), transient_command_pool)
+	log_panic(vertex_buffer_result)
+	defer destroy_buffer(device, vertex_buffer, vertex_memory)
+
+	index_buffer, index_memory, index_buffer_result := setup_buffer(physical_device, device, graphics_family_index, {.INDEX_BUFFER}, vk.DeviceSize(len(indices) * size_of(indices[0])), raw_data(indices[:]), transient_command_pool)
+	log_panic(index_buffer_result)
+	defer destroy_buffer(device, index_buffer, index_memory)
+
+	descriptor_set_layout, descriptor_set_layout_result := create_descriptor_set_layout(device, 1)
+	log_panic(descriptor_set_layout_result)
+	defer vk.DestroyDescriptorSetLayout(device, descriptor_set_layout, nil)
+
+	descriptor_pool, descriptor_pool_result := create_descriptor_pool(device, frames_in_flight)
+	log_panic(descriptor_pool_result)
+	defer vk.DestroyDescriptorPool(device, descriptor_pool, nil)
+
+	descriptor_sets, descriptor_sets_result := allocate_descriptor_sets(device, descriptor_pool, descriptor_set_layout, frames_in_flight)
+	defer delete(descriptor_sets)
+	log_panic(descriptor_sets_result)
+
+	uniform_buffers_set: [frames_in_flight][]vk.Buffer
+	uniform_buffer_memories_set: [frames_in_flight][]vk.DeviceMemory
+	for i in 0..<frames_in_flight {
+		sizes := [?]vk.DeviceSize{size_of(ModelViewProjection)}
+		buffers, memories, uniform_buffer_result := setup_uniform_buffer(physical_device, device, transient_command_pool, sizes[:])
+		log_panic(uniform_buffer_result)
+		uniform_buffers_set[i] = buffers
+		uniform_buffer_memories_set[i] = memories
+	}
+	defer {
+		for i in 0..<frames_in_flight {
+			destroy_uniform_buffer(device, uniform_buffers_set[i], uniform_buffer_memories_set[i])
+		}
+	}
+
+	extent := get_extent(window, surface_details)
+	mvp := ModelViewProjection{
+		model = linalg.MATRIX4F32_IDENTITY * flip_yz_transform,
+		view = linalg.matrix4_translate_f32([3]f32{0., 0., 3.}),
+		projection = perspective_transform(0.5, 5., f32(extent.width) / f32(extent.height), 1.5)
+	}
+
+	for i in 0..<frames_in_flight {
+		update_uniform(device, uniform_buffer_memories_set[i][0], &mvp, size_of(ModelViewProjection))
+		write_descriptor_set(device, descriptor_sets[i], 0, uniform_buffers_set[i][0])
+	}
+	
+	triangle_fragment_shader, fragment_shader_result := graphics.create_shader_module(device, #load("shaders/triangle_lit/frag.spv", []u32))
+	triangle_vertex_shader, vertex_shader_result := graphics.create_shader_module(device, #load("shaders/triangle_lit/vert.spv", []u32))
 	log_panic(fragment_shader_result)
 	log_panic(vertex_shader_result)
 
@@ -1010,35 +1296,15 @@ main :: proc() {
 	log_panic(render_pass_result)
 	defer vk.DestroyRenderPass(device, render_pass, nil)
 
-	pipeline_layout, pipeline_layout_result := graphics.create_pipeline_layout(device)
+	pipeline_layout, pipeline_layout_result := graphics.create_pipeline_layout(device, []vk.DescriptorSetLayout{descriptor_set_layout})
 	log_panic(pipeline_layout_result)
 	defer vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 
-	vertices := [?]graphics.Vertex{
-		graphics.Vertex{linalg.Vector3f32{-.5, -.5, 0.}, linalg.Vector3f32{1., 1., 0.}},
-		graphics.Vertex{linalg.Vector3f32{-.5, .5, 0}, linalg.Vector3f32{0., 1., 0.}},
-		graphics.Vertex{linalg.Vector3f32{.5, .5, 0}, linalg.Vector3f32{0., 0., 1.}},
-		graphics.Vertex{linalg.Vector3f32{.5, -.5, 0}, linalg.Vector3f32{1., 0., 0.}},
-	}
-
-	indices := [?]u32{0, 1, 2, 0, 2, 3}
-
-	transient_command_pool, transient_command_pool_result := create_transient_command_pool(physical_device, device, surface)
-	log_panic(transient_command_pool_result)
-	defer vk.DestroyCommandPool(device, transient_command_pool, nil)
-
-	vertex_buffer, vertex_memory, vertex_buffer_result := setup_buffer(physical_device, device, graphics_family_index, {.VERTEX_BUFFER}, len(vertices) * size_of(vertices[0]), raw_data(vertices[:]), transient_command_pool)
-	log_panic(vertex_buffer_result)
-	defer destroy_buffer(device, vertex_buffer, vertex_memory)
-
-	index_buffer, index_memory, index_buffer_result := setup_buffer(physical_device, device, graphics_family_index, {.INDEX_BUFFER}, len(indices) * size_of(indices[0]), raw_data(indices[:]), transient_command_pool)
-	defer destroy_buffer(device, index_buffer, index_memory)
-	
 	pipeline, pipeline_result := graphics.create_pipeline(device, triangle_fragment_shader, triangle_vertex_shader, render_pass, pipeline_layout, vertices[:])
 	log_panic(pipeline_result)
 	defer vk.DestroyPipeline(device, pipeline, nil)
 
-	framebuffers, framebuffers_result := create_framebuffers(device, views, render_pass, surface_details, window)
+	framebuffers, framebuffers_result := create_framebuffers(device, views, depth_view, render_pass, surface_details, window)
 	log_panic(framebuffers_result)
 	defer {
 		for framebuffer in framebuffers {
@@ -1099,9 +1365,21 @@ main :: proc() {
 	glfw.SetWindowUserPointer(window, &framebuffer_callback_state)
 	glfw.SetFramebufferSizeCallback(window, framebuffer_size_callback)
 
+	stopwatchs : [frames_in_flight]time.Stopwatch
+	for &stopwatch in stopwatchs {
+		time.stopwatch_start(&stopwatch)
+	}
+
 	for in_flight_index := 0; !glfw.WindowShouldClose(window); {
 		glfw.PollEvents()
-		draw(physical_device, device, &swapchain, acquire_semaphores, draw_semaphores, window, &swapchain_images, &views, &framebuffers, render_pass, graphics_command_buffers, pipeline, in_flight_fences, in_flight_index, surface, &surface_details, vertex_buffer, index_buffer, vertices[:], indices[:], &resized, graphics_family_index, surface_family_index)
+
+		time.stopwatch_stop(&stopwatchs[in_flight_index])
+		mvp.model = linalg.matrix4_rotate_f32(1. * f32(time.duration_seconds(time.stopwatch_duration(stopwatchs[in_flight_index]))), [3]f32{0., 1., 0.}) * mvp.model
+		time.stopwatch_reset(&stopwatchs[in_flight_index])
+		time.stopwatch_start(&stopwatchs[in_flight_index])
+		update_uniform(device, uniform_buffer_memories_set[in_flight_index][0], &mvp, size_of(ModelViewProjection))
+
+		draw(physical_device, device, &swapchain, acquire_semaphores, draw_semaphores, window, &swapchain_images, &views, &depth_view, &framebuffers, render_pass, graphics_command_buffers, pipeline, in_flight_fences, in_flight_index, surface, &surface_details, vertex_buffer, index_buffer, vertices[:], indices[:], &resized, graphics_family_index, surface_family_index, descriptor_sets[in_flight_index], pipeline_layout)
 		in_flight_index = (in_flight_index + 1) % frames_in_flight
 	}
 
