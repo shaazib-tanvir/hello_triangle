@@ -17,5 +17,5 @@ layout(location = 1) out vec3 normal;
 void main() {
 	gl_Position = mvp.projection * mvp.view * mvp.model * vec4(inPos, 1.0);
 	fragColor = inColor;
-	normal = (mvp.model * vec4(inNormal, 1.)).xyz;
+	normal = transpose(inverse(mat3(mvp.model))) * inNormal;
 }
